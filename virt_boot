@@ -60,7 +60,6 @@ def add_element(tree, k, v):
     os.appendChild(el)
 
 def write_xml(tree, conn):
-    tree.writexml(open('/tmp/virt-xml.txt','w'))
     conn.defineXML( tree.toxml() )
 
 def main():
