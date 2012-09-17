@@ -1,0 +1,127 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# (c) 2012, Jeroen Hoekx <jeroen@hoekx.be>
+#
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
+from xml.dom.minidom import parseString
+
+try:
+    import libvirt
+except ImportError:
+    print "failed=True msg='libvirt python module unavailable'"
+    sys.exit(1)
+
+def get_domain(name):
+    conn = libvirt.open("qemu:///system")
+    domain = conn.lookupByName(name)
+
+    return domain, conn
+
+def get_xml(domain):
+    domain_data = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    tree = parseString(domain_data)
+
+    return tree
+
+def clear_os(tree):
+    os = tree.getElementsByTagName('os').item(0)
+
+    for item in ['boot', 'bootmenu', 'kernel', 'initrd', 'cmdline']:
+        to_remove = []
+        for element in os.getElementsByTagName(item):
+            to_remove.append(element)
+        for element in to_remove:
+            os.removeChild(element)
+
+def add_element(tree, k, v):
+    os = tree.getElementsByTagName('os').item(0)
+    el = tree.createElement(k)
+    if k == 'boot':
+        el.setAttribute('dev', v)
+    if k == 'bootmenu':
+        el.setAttribute('enable', v)
+    else:
+        el.appendChild( tree.createTextNode(v) )
+    os.appendChild(el)
+
+def write_xml(tree, conn):
+    tree.writexml(open('/tmp/virt-xml.txt','w'))
+    conn.defineXML( tree.toxml() )
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec = dict(
+            domain=dict(required=True),
+            boot=dict(),
+            bootmenu=dict(),
+            kernel=dict(),
+            initrd=dict(),
+            cmdline=dict(),
+        ),
+        required_one_of = [['boot','kernel']],
+        mutually_exclusive = [['boot','kernel']]
+    )
+
+    params = module.params
+
+    domain_name = params['domain']
+
+    boot = params['boot']
+    bootmenu = module.boolean(params['bootmenu'])
+    kernel = params['kernel']
+    initrd = params['initrd']
+    cmdline = params['cmdline']
+
+    if boot:
+        items = boot.split(',')
+
+        domain, conn = get_domain(domain_name)
+        if domain.isActive():
+            module.fail_json(msg="Domain %s is still running."%(domain_name))
+        tree = get_xml(domain)
+        clear_os(tree)
+
+        for item in items:
+            add_element(tree, 'boot', item)
+
+        if bootmenu:
+            add_element(tree, 'bootmenu', 'yes')
+
+        write_xml(tree, conn)
+        module.exit_json(boot=boot)
+    elif kernel:
+        domain, conn = get_domain(domain_name)
+        if domain.isActive():
+            module.fail_json(msg="Domain %s is still running."%(domain_name))
+        tree = get_xml(domain)
+        clear_os(tree)
+
+        add_element(tree, 'kernel', kernel)
+        add_element(tree, 'initrd', initrd)
+        add_element(tree, 'cmdline', cmdline)
+
+        if bootmenu:
+            add_element(tree, 'bootmenu', 'yes')
+
+        write_xml(tree, conn)
+        module.exit_json(kernel=kernel, initrd=initrd, cmdline=cmdline)
+
+# this is magic, see lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
