@@ -62,18 +62,38 @@ def add_element(tree, k, v):
 def write_xml(tree, conn):
     conn.defineXML( tree.toxml() )
 
+def attach_disk(domain, image, device):
+    CDROM_TEMPLATE='''<disk type="file" device="disk">
+                        <driver name="qemu" type="raw"/>
+                        <source file="{path}"/>
+                        <target bus="virtio" dev="{dev}"/>
+                      </disk>'''
+    xml = CDROM_TEMPLATE.format(path=image, dev=device)
+    domain.updateDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+
+def detach_disk(domain, tree, device):
+    for target in tree.getElementsByTagName('target'):
+        if target.getAttribute("dev") == device:
+            source = target.parentNode.getElementsByTagName('source').item(0)
+            source.removeAttribute("file")
+            xml = target.parentNode.toxml()
+            domain.updateDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            break
+
 def main():
 
     module = AnsibleModule(
         argument_spec = dict(
-            domain=dict(required=True),
+            domain=dict(required=True, aliases=['guest']),
             boot=dict(),
             bootmenu=dict(),
             kernel=dict(),
             initrd=dict(),
             cmdline=dict(),
+            device=dict(default='hdc'),
+            image=dict(),
         ),
-        required_one_of = [['boot','kernel']],
+        required_one_of = [['boot','kernel','image']],
         mutually_exclusive = [['boot','kernel']]
     )
 
@@ -87,13 +107,24 @@ def main():
     initrd = params['initrd']
     cmdline = params['cmdline']
 
+    device = params['device']
+    image = params['image']
+
+    domain, conn = get_domain(domain_name)
+    if domain.isActive():
+        module.fail_json(msg="Domain %s is still running."%(domain_name))
+    tree = get_xml(domain)
+
+    if image:
+        attach_disk(domain, image, device)
+        if not boot and not kernel:
+            module.exit_json(image=image, device=device)
+    else:
+        detach_disk(domain, tree, device)
+
     if boot:
         items = boot.split(',')
 
-        domain, conn = get_domain(domain_name)
-        if domain.isActive():
-            module.fail_json(msg="Domain %s is still running."%(domain_name))
-        tree = get_xml(domain)
         clear_os(tree)
 
         for item in items:
@@ -103,6 +134,7 @@ def main():
             add_element(tree, 'bootmenu', 'yes')
 
         write_xml(tree, conn)
+
         module.exit_json(boot=boot)
     elif kernel:
         domain, conn = get_domain(domain_name)
@@ -119,6 +151,7 @@ def main():
             add_element(tree, 'bootmenu', 'yes')
 
         write_xml(tree, conn)
+
         module.exit_json(kernel=kernel, initrd=initrd, cmdline=cmdline)
 
 # this is magic, see lib/ansible/module_common.py
