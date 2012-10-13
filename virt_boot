@@ -93,21 +93,6 @@ except ImportError:
     print "failed=True msg='libvirt python module unavailable'"
     sys.exit(1)
 
-def get_domain(name):
-    conn = libvirt.open("qemu:///system")
-    domain = conn.lookupByName(name)
-
-    return domain, conn
-
-def get_xml(domain):
-    domain_data = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-    tree = parseString(domain_data)
-
-    return tree
-
-def write_xml(tree, conn):
-    conn.defineXML( tree.toxml() )
-
 def element_text(element, data=None):
     if data:
         to_be_removed = []
@@ -131,12 +116,11 @@ def attach_disk(domain, tree, device, image):
         if source and source.getAttribute("file") == image:
             return False
 
-    CDROM_TEMPLATE='''<disk type="file" device="disk">
-                        <driver name="qemu" type="raw"/>
-                        <source file="{path}"/>
-                        <target bus="virtio" dev="{dev}"/>
-                      </disk>'''
-    xml = CDROM_TEMPLATE.format(path=image, dev=device)
+    xml = '''<disk type="file" device="disk">
+                <driver name="qemu" type="raw"/>
+                <source file="{path}"/>
+                <target bus="virtio" dev="{dev}"/>
+             </disk>'''.format(path=image, dev=device)
     domain.updateDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
     return True
 
@@ -183,10 +167,9 @@ def main():
 
     changed = False
 
-    domain, conn = get_domain(domain_name)
-    if domain.isActive():
-        module.fail_json(msg="Domain %s is still running."%(domain_name))
-    tree = get_xml(domain)
+    conn = libvirt.open("qemu:///system")
+    domain = conn.lookupByName(domain_name)
+    tree = parseString(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
 
     ### Connect image
     if image:
@@ -197,7 +180,7 @@ def main():
         changed = changed or detach_disk(domain, tree, device)
 
     if changed:
-        tree = get_xml(domain)
+        tree = parseString(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
 
     ### Boot ordering
     os = tree.getElementsByTagName('os').item(0)
@@ -300,7 +283,7 @@ def main():
         changed = True
 
     ### save back
-    write_xml(tree, conn)
+    conn.defineXML( tree.toxml() )
 
     module.exit_json(changed=changed)
 
