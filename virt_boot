@@ -81,11 +81,12 @@ requirements: [ "libvirt" ]
 notes:
   - Run this on the libvirt host.
   - I(kernel) and I(boot) are mutually exclusive.
-  - This module can not change a running system.
-  - Using direct kernel boot will always result in a I(changed) state due to libvirt internals.
+  - This module does not change a running system. A shutdown/restart is required.
 '''
 
-from xml.dom.minidom import parseString
+import xml.etree.ElementTree as ET
+
+from xml.etree.ElementTree import SubElement
 
 try:
     import libvirt
@@ -93,27 +94,18 @@ except ImportError:
     print "failed=True msg='libvirt python module unavailable'"
     sys.exit(1)
 
-def element_text(element, data=None):
-    if data:
-        to_be_removed = []
-        for node in element.childNodes:
-            to_be_removed.append(node)
-        for node in to_be_removed:
-            element.removeChild(node)
-        element.appendChild( element.ownerDocument.createTextNode(data) )
-    if element.firstChild and element.firstChild.nodeType==element.TEXT_NODE:
-        return element.firstChild.data
+def get_disk(doc, device):
+    for disk in doc.findall('.//disk'):
+        target = disk.find('target')
+        if target is not None:
+            if target.get('dev','') == device:
+                return disk
 
-def get_disk(tree, device):
-    for target in tree.getElementsByTagName('target'):
-        if target.getAttribute("dev") == device:
-            return target
-
-def attach_disk(domain, tree, device, image):
-    disk = get_disk(tree, device)
-    if disk:
-        source = disk.parentNode.getElementsByTagName('source').item(0)
-        if source and source.getAttribute("file") == image:
+def attach_disk(domain, doc, device, image):
+    disk = get_disk(doc, device)
+    if disk is not None:
+        source = disk.find('source')
+        if source is not None and source.get('file') == image:
             return False
 
     xml = '''<disk type="file" device="disk">
@@ -124,14 +116,13 @@ def attach_disk(domain, tree, device, image):
     domain.updateDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
     return True
 
-def detach_disk(domain, tree, device):
-    disk = get_disk(tree, device)
-    if disk:
-        source = disk.parentNode.getElementsByTagName('source').item(0)
-        if source and source.hasAttribute("file"):
-            source.removeAttribute("file")
-            xml = disk.parentNode.toxml()
-            domain.updateDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+def detach_disk(domain, doc, device):
+    disk = get_disk(doc, device)
+    if disk is not None:
+        source = disk.find('source')
+        if source is not None and 'file' in source.attrib:
+            del source.attrib['file']
+            domain.updateDeviceFlags(ET.tostring(disk), libvirt.VIR_DOMAIN_AFFECT_CONFIG)
             return True
     return False
 
@@ -156,8 +147,9 @@ def main():
 
     domain_name = params['domain']
 
-    boot = params['boot']
     bootmenu = module.boolean(params['bootmenu'])
+
+    boot = params['boot']
     kernel = params['kernel']
     initrd = params['initrd']
     cmdline = params['cmdline']
@@ -169,121 +161,114 @@ def main():
 
     conn = libvirt.open("qemu:///system")
     domain = conn.lookupByName(domain_name)
-    tree = parseString(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+
+    doc = ET.fromstring( domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE) )
 
     ### Connect image
     if image:
-        changed = changed or attach_disk(domain, tree, device, image)
+        changed = changed or attach_disk(domain, doc, device, image)
         if not boot and not kernel:
             module.exit_json(changed=changed, image=image, device=device)
     else:
-        changed = changed or detach_disk(domain, tree, device)
+        changed = changed or detach_disk(domain, doc, device)
 
     if changed:
-        tree = parseString(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        doc = ET.fromstring( domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE) )
 
     ### Boot ordering
-    os = tree.getElementsByTagName('os').item(0)
-    boot_list = os.getElementsByTagName('boot')
-    kernel_el = os.getElementsByTagName('kernel').item(0)
-    initrd_el = os.getElementsByTagName('initrd').item(0)
-    cmdline_el = os.getElementsByTagName('cmdline').item(0)
+    os = doc.find('os')
+    boot_list = os.findall('boot')
+    kernel_el = os.find('kernel')
+    initrd_el = os.find('initrd')
+    cmdline_el = os.find('cmdline')
+
+    ### traditional boot
     if boot:
-        if kernel_el:
+        if kernel_el is not None:
             changed = True
-            kernel_el.parentNode.removeChild(kernel_el)
-        if initrd_el:
+            os.remove(kernel_el)
+        if initrd_el is not None:
             changed = True
-            initrd_el.parentNode.removeChild(initrd_el)
-        if cmdline_el:
+            os.remove(initrd_el)
+        if cmdline_el is not None:
             changed = True
-            cmdline_el.parentNode.removeChild(cmdline_el)
+            os.remove(cmdline_el)
 
         items = boot.split(',')
         if boot_list:
             needs_change = False
             if len(items) == len(boot_list):
                 for (boot_el, dev) in zip(boot_list, items):
-                    if boot_el.getAttribute('dev') != dev:
+                    if boot_el.get('dev') != dev:
                         needs_change = True
             else:
                 needs_change = True
 
             if needs_change:
                 changed = True
-                to_be_removed = []
                 for boot_el in boot_list:
-                    to_be_removed.append(boot_el)
-                for boot_el in to_be_removed:
-                    os.removeChild(boot_el)
+                    os.remove(boot_el)
                 for item in items:
-                    boot_el = tree.createElement('boot')
-                    boot_el.setAttribute('dev', item)
-                    os.appendChild(boot_el)
+                    boot_el = SubElement(os, 'boot')
+                    boot_el.set('dev', item)
         else:
             changed = True
             for item in items:
-                boot_el = tree.createElement('boot')
-                boot_el.setAttribute('dev', item)
-                os.appendChild(boot_el)
-
+                boot_el = SubElement(os, 'boot')
+                boot_el.set('dev', item)
+    ### direct kernel boot
     elif kernel:
         if boot_list:
-            changed = True
-            to_be_removed = []
-            for boot_el in boot_list:
-                to_be_removed.append(boot_el)
-            for boot_el in to_be_removed:
-                os.removeChild(boot_el)
-        if kernel_el:
-            if element_text(kernel_el) != kernel:
+            ### libvirt alwas adds boot=hd using direct kernel boot
+            if not (len(boot_list)==1 and boot_list[0].get('dev')=='hd'):
                 changed = True
-                element_text(kernel_el, kernel)
-        else:
-            changed = True
-            kernel_el = tree.createElement('kernel')
-            kernel_el.appendChild( tree.createTextNode(kernel) )
-            os.appendChild(kernel_el)
+                for boot_el in boot_list:
+                    os.remove(boot_el)
 
-        if initrd_el:
-            if element_text(initrd_el) != initrd:
+        if kernel_el is not None:
+            if kernel_el.text != kernel:
                 changed = True
-                element_text(initrd_el, initrd)
+                kernel_el.text = kernel
         else:
             changed = True
-            initrd_el = tree.createElement('initrd')
-            initrd_el.appendChild( tree.createTextNode(initrd) )
-            os.appendChild(initrd_el)
+            kernel_el = SubElement(os, 'kernel')
+            kernel_el.text = kernel
 
-        if cmdline_el:
-            if element_text(cmdline_el) != cmdline:
+        if initrd_el is not None:
+            if initrd_el.text != initrd:
                 changed = True
-                element_text(cmdline_el, cmdline)
+                initrd_el.text = initrd
         else:
             changed = True
-            cmdline_el = tree.createElement('cmdline')
-            cmdline_el.appendChild( tree.createTextNode(cmdline) )
-            os.appendChild(cmdline_el)
+            initrd_el = SubElement(os, 'initrd')
+            initrd_el.text = initrd
+
+        if cmdline_el is not None:
+            if cmdline_el.text != cmdline:
+                changed = True
+                cmdline_el.text = cmdline
+        else:
+            changed = True
+            cmdline_el = SubElement(os, 'cmdline')
+            cmdline_el.text = cmdline
 
     ### Enable/disable bootmenu
-    bootmenu_state = tree.getElementsByTagName('bootmenu').item(0)
-    if bootmenu and bootmenu_state:
-        bootmenu_enabled = bootmenu_state.getAttribute('enable')
+    bootmenu_el = os.find('bootmenu')
+    if bootmenu and bootmenu_el is not None:
+        bootmenu_enabled = bootmenu_el.get('enable')
         if bootmenu_enabled != 'yes':
             changed = True
-            bootmenu_state.setAttribute('enable', 'yes')
+            bootmenu_el.set('enable', 'yes')
     elif bootmenu:
-        os = tree.getElementsByTagName('os').item(0)
-        bootmenu_state = tree.createElement('bootmenu')
-        bootmenu_state.setAttribute('enable', 'yes')
+        bootmenu_el = SubElement(os, 'bootmenu')
+        bootmenu_el.set('enable', 'yes')
         changed = True
-        os.appendChild(bootmenu_state)
-    elif bootmenu_state:
-        bootmenu_state.parentNode.removeChild(bootmenu_state)
+    elif bootmenu_el is not None:
+        os.remove(bootmenu_el)
         changed = True
 
     ### save back
-    conn.defineXML( tree.toxml() )
+    conn.defineXML( ET.tostring(doc) )
 
     module.exit_json(changed=changed)
 
